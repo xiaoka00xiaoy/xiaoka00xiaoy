@@ -1,0 +1,87 @@
+Sub DownloadPDFFromCellA1()
+    Dim pdfUrl As String
+    Dim localFilePath As String
+    Dim response As Object
+    Dim fileStream As Object
+    Dim pdfData() As Byte
+    Dim folderPath As String
+    
+    ' 获取A1单元格中的URL
+    pdfUrl = Range("A1").Value
+    
+    ' 检查URL是否为空
+    If pdfUrl = "" Then
+        MsgBox "A1单元格中没有找到URL", vbExclamation
+        Exit Sub
+    End If
+    
+    ' 检查URL是否有效（简单验证）
+    If Left(pdfUrl, 4) <> "http" Then
+        MsgBox "A1单元格中的内容不是有效的URL", vbExclamation
+        Exit Sub
+    End If
+    
+    ' 让用户选择保存位置
+    With Application.FileDialog(msoFileDialogFolderPicker)
+        .Title = "选择PDF保存位置"
+        .AllowMultiSelect = False
+        If .Show = -1 Then
+            folderPath = .SelectedItems(1)
+        Else
+            Exit Sub
+        End If
+    End With
+    
+    ' 从URL中提取文件名
+    Dim fileName As String
+    fileName = Right(pdfUrl, Len(pdfUrl) - InStrRev(pdfUrl, "/"))
+    
+    ' 如果URL中没有文件名，使用默认名称
+    If fileName = "" Or InStr(fileName, ".") = 0 Then
+        fileName = "downloaded_file.pdf"
+    End If
+    
+    ' 完整的本地文件路径
+    localFilePath = folderPath & "\" & fileName
+    
+    ' 检查文件是否已存在
+    If Dir(localFilePath) <> "" Then
+        If MsgBox("文件已存在，是否覆盖？", vbYesNo + vbQuestion) = vbNo Then
+            Exit Sub
+        End If
+    End If
+    
+    ' 创建HTTP请求对象
+    Set response = CreateObject("MSXML2.XMLHTTP")
+    
+    ' 显示进度信息
+    Application.StatusBar = "正在连接服务器..."
+    
+    ' 发送GET请求
+    response.Open "GET", pdfUrl, False
+    response.send
+    
+    ' 检查请求是否成功
+    If response.Status <> 200 Then
+        MsgBox "下载失败，HTTP错误: " & response.Status & " - " & response.statusText, vbExclamation
+        Application.StatusBar = False
+        Exit Sub
+    End If
+    
+    ' 获取响应数据
+    pdfData = response.responseBody
+    
+    ' 创建文件流对象
+    Set fileStream = CreateObject("ADODB.Stream")
+    fileStream.Type = 1 ' 二进制类型
+    fileStream.Open
+    fileStream.Write pdfData
+    fileStream.SaveToFile localFilePath, 2 ' 2 = 覆盖已存在文件
+    fileStream.Close
+    
+    ' 清除状态栏
+    Application.StatusBar = False
+    
+    ' 显示成功消息
+    MsgBox "PDF已成功下载到:" & vbCrLf & localFilePath, vbInformation
+End Sub
