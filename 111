@@ -1,0 +1,402 @@
+
+Option Explicit
+
+' API声明用于显示文件选择对话框
+#If VBA7 Then
+    Private Declare PtrSafe Function GetOpenFileName Lib "comdlg32.dll" Alias "GetOpenFileNameA" (pOpenFileName As OPENFILENAME) As Long
+    Private Declare PtrSafe Function GetSaveFileName Lib "comdlg32.dll" Alias "GetSaveFileNameA" (pOpenFileName As OPENFILENAME) As Long
+#Else
+    Private Declare Function GetOpenFileName Lib "comdlg32.dll" Alias "GetOpenFileNameA" (pOpenFileName As OPENFILENAME) As Long
+    Private Declare Function GetSaveFileName Lib "comdlg32.dll" Alias "GetSaveFileNameA" (pOpenFileName As OPENFILENAME) As Long
+#End If
+
+Private Type OPENFILENAME
+    lStructSize As Long
+    hwndOwner As Long
+    hInstance As Long
+    lpstrFilter As String
+    lpstrCustomFilter As String
+    nMaxCustFilter As Long
+    nFilterIndex As Long
+    lpstrFile As String
+    nMaxFile As Long
+    lpstrFileTitle As String
+    nMaxFileTitle As Long
+    lpstrInitialDir As String
+    lpstrTitle As String
+    flags As Long
+    nFileOffset As Integer
+    nFileExtension As Integer
+    lpstrDefExt As String
+    lCustData As Long
+    lpfnHook As Long
+    lpTemplateName As Long
+End Type
+
+' 全局变量
+Private downloadQueue As Collection
+Private stopDownload As Boolean
+
+' 下载项类模块
+' 需要在VBA编辑器中插入类模块并命名为"DownloadItem"
+' 以下是DownloadItem类的代码：
+' Private mURL As String
+' Private mPath As String
+' Private mStatus As String
+'
+' Public Property Get URL() As String
+'     URL = mURL
+' End Property
+'
+' Public Property Let URL(ByVal sURL As String)
+'     mURL = sURL
+' End Property
+'
+' Public Property Get Path() As String
+'     Path = mPath
+' End Property
+'
+' Public Property Let Path(ByVal sPath As String)
+'     mPath = sPath
+' End Property
+'
+' Public Property Get Status() As String
+'     Status = mStatus
+' End Property
+'
+' Public Property Let Status(ByVal sStatus As String)
+'     mStatus = sStatus
+' End Property
+
+' 初始化界面
+Private Sub Workbook_Open()
+    SetupDownloadSheet
+End Sub
+
+' 设置下载工作表
+Private Sub SetupDownloadSheet()
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Sheets("下载管理器")
+    On Error GoTo 0
+    
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Sheets.Add
+        ws.Name = "下载管理器"
+    Else
+        ws.Cells.Clear
+    End If
+    
+    ' 设置表头
+    With ws
+        .Range("A1").Value = "URL"
+        .Range("B1").Value = "保存路径"
+        .Range("C1").Value = "状态"
+        .Range("D1").Value = "大小"
+        .Range("E1").Value = "耗时"
+        
+        ' 设置列宽
+        .Columns("A:A").ColumnWidth = 50
+        .Columns("B:B").ColumnWidth = 30
+        .Columns("C:C").ColumnWidth = 15
+        .Columns("D:D").ColumnWidth = 12
+        .Columns("E:E").ColumnWidth = 10
+        
+        ' 设置格式
+        .Rows(1).Font.Bold = True
+        .Rows(1).Interior.Color = RGB(200, 200, 200)
+    End With
+    
+    ' 添加按钮
+    AddButtons ws
+End Sub
+
+' 添加操作按钮
+Private Sub AddButtons(ws As Worksheet)
+    Dim btn As Button
+    Dim rng As Range
+    
+    Set rng = ws.Range("G1")
+    Set btn = ws.Buttons.Add(rng.Left, rng.Top, 80, 25)
+    With btn
+        .Caption = "添加下载"
+        .OnAction = "AddDownload"
+        .Name = "btnAdd"
+    End With
+    
+    Set rng = ws.Range("G2")
+    Set btn = ws.Buttons.Add(rng.Left, rng.Top, 80, 25)
+    With btn
+        .Caption = "开始下载"
+        .OnAction = "StartDownload"
+        .Name = "btnStart"
+    End With
+    
+    Set rng = ws.Range("G3")
+    Set btn = ws.Buttons.Add(rng.Left, rng.Top, 80, 25)
+    With btn
+        .Caption = "停止下载"
+        .OnAction = "StopDownload"
+        .Name = "btnStop"
+    End With
+    
+    Set rng = ws.Range("G4")
+    Set btn = ws.Buttons.Add(rng.Left, rng.Top, 80, 25)
+    With btn
+        .Caption = "清除完成"
+        .OnAction = "ClearCompleted"
+        .Name = "btnClear"
+    End With
+    
+    Set rng = ws.Range("G5")
+    Set btn = ws.Buttons.Add(rng.Left, rng.Top, 80, 25)
+    With btn
+        .Caption = "批量导入"
+        .OnAction = "BatchImport"
+        .Name = "btnImport"
+    End With
+End Sub
+
+' 添加下载任务
+Public Sub AddDownload()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets("下载管理器")
+    
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row + 1
+    
+    ' 获取URL和保存路径
+    Dim url As String
+    Dim path As String
+    
+    url = InputBox("请输入文件URL:", "添加下载")
+    If url = "" Then Exit Sub
+    
+    path = ShowSaveDialog(GetFileNameFromURL(url))
+    If path = "" Then Exit Sub
+    
+    ' 添加到列表
+    ws.Cells(lastRow, 1).Value = url
+    ws.Cells(lastRow, 2).Value = path
+    ws.Cells(lastRow, 3).Value = "等待中"
+End Sub
+
+' 从URL提取文件名
+Private Function GetFileNameFromURL(url As String) As String
+    Dim parts() As String
+    parts = Split(url, "/")
+    GetFileNameFromURL = parts(UBound(parts))
+End Function
+
+' 显示保存文件对话框
+Private Function ShowSaveDialog(Optional defaultName As String = "") As String
+    Dim ofn As OPENFILENAME
+    Dim ret As Long
+    
+    ofn.lStructSize = Len(ofn)
+    ofn.hwndOwner = 0
+    ofn.hInstance = 0
+    ofn.lpstrFilter = "所有文件 (*.*)" & Chr(0) & "*.*" & Chr(0)
+    ofn.lpstrFile = Space(259)
+    ofn.nMaxFile = 260
+    ofn.lpstrFileTitle = Space(259)
+    ofn.nMaxFileTitle = 260
+    ofn.lpstrInitialDir = ThisWorkbook.Path
+    ofn.lpstrTitle = "选择保存位置"
+    ofn.flags = 0
+    
+    If defaultName <> "" Then
+        ofn.lpstrFile = defaultName & Space(259 - Len(defaultName))
+    End If
+    
+    ret = GetSaveFileName(ofn)
+    
+    If ret Then
+        ShowSaveDialog = Trim(ofn.lpstrFile)
+    Else
+        ShowSaveDialog = ""
+    End If
+End Function
+
+' 开始下载
+Public Sub StartDownload()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets("下载管理器")
+    
+    ' 初始化下载队列
+    Set downloadQueue = New Collection
+    stopDownload = False
+    
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    
+    If lastRow < 2 Then
+        MsgBox "没有可下载的任务", vbInformation
+        Exit Sub
+    End If
+    
+    Dim i As Long
+    For i = 2 To lastRow
+        If ws.Cells(i, 3).Value = "等待中" Or ws.Cells(i, 3).Value = "失败" Then
+            Dim item As DownloadItem
+            Set item = New DownloadItem
+            item.URL = ws.Cells(i, 1).Value
+            item.Path = ws.Cells(i, 2).Value
+            downloadQueue.Add item
+        End If
+    Next i
+    
+    If downloadQueue.Count = 0 Then
+        MsgBox "没有可下载的任务", vbInformation
+        Exit Sub
+    End If
+    
+    ' 开始下载
+    Application.StatusBar = "准备下载..."
+    DownloadFiles ws
+    Application.StatusBar = False
+End Sub
+
+' 下载文件
+Private Sub DownloadFiles(ws As Worksheet)
+    Dim i As Long, queueIndex As Long
+    Dim startTime As Double, endTime As Double
+    Dim http As Object
+    Set http = CreateObject("MSXML2.ServerXMLHTTP")
+    
+    For queueIndex = 1 To downloadQueue.Count
+        If stopDownload Then
+            ws.Cells(FindDownloadRow(ws, downloadQueue(queueIndex).URL), 3).Value = "已停止"
+            Exit For
+        End If
+        
+        Dim item As DownloadItem
+        Set item = downloadQueue(queueIndex)
+        
+        i = FindDownloadRow(ws, item.URL)
+        
+        If i > 0 Then
+            On Error Resume Next
+            ws.Cells(i, 3).Value = "下载中..."
+            ws.Cells(i, 5).Value = ""
+            Application.StatusBar = "下载中: " & GetFileNameFromURL(item.URL)
+            
+            startTime = Timer
+            http.Open "GET", item.URL, False
+            http.send
+            
+            If Err.Number <> 0 Then
+                ws.Cells(i, 3).Value = "失败"
+                ws.Cells(i, 3).Interior.Color = RGB(255, 200, 200)
+                Err.Clear
+            Else
+                If http.Status = 200 Then
+                    Dim stream As Object
+                    Set stream = CreateObject("ADODB.Stream")
+                    stream.Open
+                    stream.Type = 1
+                    stream.Write http.responseBody
+                    stream.SaveToFile item.Path, 2
+                    stream.Close
+                    
+                    endTime = Timer
+                    Dim fileSize As Long
+                    fileSize = http.responseBody.length
+                    
+                    ws.Cells(i, 3).Value = "完成"
+                    ws.Cells(i, 3).Interior.Color = RGB(200, 255, 200)
+                    ws.Cells(i, 4).Value = FormatFileSize(fileSize)
+                    ws.Cells(i, 5).Value = Format(endTime - startTime, "0.00") & "秒"
+                Else
+                    ws.Cells(i, 3).Value = "失败: HTTP " & http.Status
+                    ws.Cells(i, 3).Interior.Color = RGB(255, 200, 200)
+                End If
+            End On Error GoTo 0
+        End If
+    Next queueIndex
+    
+    Set http = Nothing
+    Application.StatusBar = False
+End Sub
+
+' 查找下载任务所在行
+Private Function FindDownloadRow(ws As Worksheet, url As String) As Long
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    
+    Dim i As Long
+    For i = 2 To lastRow
+        If ws.Cells(i, 1).Value = url Then
+            FindDownloadRow = i
+            Exit Function
+        End If
+    Next i
+    
+    FindDownloadRow = 0
+End Function
+
+' 格式化文件大小
+Private Function FormatFileSize(sizeInBytes As Long) As String
+    If sizeInBytes < 1024 Then
+        FormatFileSize = sizeInBytes & " B"
+    ElseIf sizeInBytes < 1024 ^ 2 Then
+        FormatFileSize = Format(sizeInBytes / 1024, "0.00") & " KB"
+    ElseIf sizeInBytes < 1024 ^ 3 Then
+        FormatFileSize = Format(sizeInBytes / (1024 ^ 2), "0.00") & " MB"
+    Else
+        FormatFileSize = Format(sizeInBytes / (1024 ^ 3), "0.00") & " GB"
+    End If
+End Function
+
+' 停止下载
+Public Sub StopDownload()
+    stopDownload = True
+    ThisWorkbook.Sheets("下载管理器").Range("A1").Select
+    Application.StatusBar = "下载已停止"
+End Sub
+
+' 清除已完成的任务
+Public Sub ClearCompleted()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets("下载管理器")
+    
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    
+    If lastRow < 2 Then Exit Sub
+    
+    Dim i As Long
+    For i = lastRow To 2 Step -1
+        If ws.Cells(i, 3).Value = "完成" Then
+            ws.Rows(i).Delete
+        End If
+    Next i
+End Sub
+
+' 批量导入URL
+Public Sub BatchImport()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets("下载管理器")
+    
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row + 1
+    
+    Dim urlList As Variant
+    urlList = Application.InputBox("请输入URL列表(每行一个):", "批量导入", Type:=2)
+    
+    If urlList = False Then Exit Sub ' 用户取消了输入
+    
+    Dim urls() As String
+    urls = Split(urlList, vbNewLine)
+    
+    Dim i As Long
+    For i = LBound(urls) To UBound(urls)
+        If Trim(urls(i)) <> "" Then
+            ws.Cells(lastRow, 1).Value = Trim(urls(i))
+            ws.Cells(lastRow, 3).Value = "等待中"
+            lastRow = lastRow + 1
+        End If
+    Next i
+    
+    MsgBox "已导入 " & (UBound(urls) - LBound(urls) + 1) & " 个URL", vbInformation
+End Sub
